@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const express = require('express'); // 1. Express import karo
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const { connectToDatabase, Room } = require('./db');
@@ -14,17 +15,25 @@ const {
 } = require('./roomState');
 
 const PORT = process.env.PORT || 4000;
-
-// Allow requests from localhost OR your production Vercel frontend URL
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
-
 const DEBUG = process.env.DEBUG_SOCKET !== 'false';
 
 function log(...args) {
   if (DEBUG) console.log('[socket]', ...args);
 }
 
-const httpServer = createServer();
+// 2. Express instance and Health Check Route for Render
+const app = express();
+app.use(express.json());
+
+// Render health scanner relies on this route!
+app.get('/', (req, res) => {
+  res.status(200).send('WatchParty Socket.io server is running smoothly!');
+});
+
+// 3. Pass Express app into HTTP server
+const httpServer = createServer(app);
+
 const io = new Server(httpServer, {
   cors: { 
     origin: CORS_ORIGIN, 
@@ -126,9 +135,8 @@ io.on('connection', (socket) => {
 connectToDatabase()
   .then(() => {
     log('connected to MongoDB');
-    // Important: Added '0.0.0.0' for Render Port Scanning
     httpServer.listen(PORT, '0.0.0.0', () => {
-      console.log(`Socket.io server listening on port ${PORT}`);
+      console.log(`Server listening on port ${PORT}`);
     });
   })
   .catch((err) => {
