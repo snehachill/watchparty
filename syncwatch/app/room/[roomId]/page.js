@@ -22,6 +22,12 @@ export default function RoomPage() {
 
   const router = useRouter();
 
+  // Early return if roomId is undefined during hydration
+  if (!roomId) {
+    console.log('[Room] roomId is undefined, waiting for hydration...');
+    return null;
+  }
+
   const socketRef = useRef(null);
   const playerRef = useRef(null);
   const playerElRef = useRef(null);
@@ -55,6 +61,8 @@ export default function RoomPage() {
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [remoteStreams, setRemoteStreams] = useState({});
+  const [isLoadingRoom, setIsLoadingRoom] = useState(false);
+  const [roomFetchError, setRoomFetchError] = useState('');
 
   useEffect(() => {
     if (hasLocalStream && localVideoRef.current && localStreamRef.current) {
@@ -94,6 +102,7 @@ export default function RoomPage() {
 
     async function setup() {
       try {
+        console.log('[Media] Requesting camera/mic access...');
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
@@ -101,45 +110,67 @@ export default function RoomPage() {
         }
         localStreamRef.current = stream;
         setHasLocalStream(true);
+        console.log('[Media] Camera/mic access granted');
       } catch (err) {
+        console.error('[Media] Camera/mic access failed:', err);
         if (!cancelled) {
           setMediaError("Camera or mic access wasn't granted — you can still watch and chat.");
         }
       }
 
-      const peer = createPeer();
-      peerRef.current = peer;
+      try {
+        console.log('[Peer] Initializing PeerJS...');
+        const peer = createPeer();
+        peerRef.current = peer;
 
-      peer.on('open', (id) => {
-        if (cancelled) return;
-        myPeerIdRef.current = id;
-        setPeerSetupDone(true);
-      });
-
-      peer.on('error', (err) => {
-        if (!cancelled) setPeerSetupDone(true);
-      });
-
-      peer.on('call', (call) => {
-        call.answer(localStreamRef.current || undefined);
-        call.on('stream', (remoteStream) => {
-          setRemoteStreams((prev) => ({ ...prev, [call.peer]: remoteStream }));
+        peer.on('open', (id) => {
+          if (cancelled) return;
+          console.log('[Peer] PeerJS connected with ID:', id);
+          myPeerIdRef.current = id;
+          setPeerSetupDone(true);
         });
-        call.on('close', () => {
-          setRemoteStreams((prev) => {
-            const next = { ...prev };
-            delete next[call.peer];
-            return next;
+
+        peer.on('error', (err) => {
+          console.error('[Peer] PeerJS error:', err);
+          if (!cancelled) {
+            setPeerSetupDone(true);
+            // Don't crash the app on PeerJS errors - just log them
+          }
+        });
+
+        peer.on('call', (call) => {
+          console.log('[Peer] Incoming call from:', call.peer);
+          call.answer(localStreamRef.current || undefined);
+          call.on('stream', (remoteStream) => {
+            console.log('[Peer] Received remote stream from:', call.peer);
+            setRemoteStreams((prev) => ({ ...prev, [call.peer]: remoteStream }));
           });
+          call.on('close', () => {
+            console.log('[Peer] Call ended with:', call.peer);
+            setRemoteStreams((prev) => {
+              const next = { ...prev };
+              delete next[call.peer];
+              return next;
+            });
+          });
+          activeCallsRef.current.set(call.peer, call);
         });
-        activeCallsRef.current.set(call.peer, call);
-      });
+      } catch (err) {
+        console.error('[Peer] PeerJS initialization failed:', err);
+        if (!cancelled) {
+          setMediaError("Video calling failed to initialize — you can still watch and chat.");
+          setPeerSetupDone(true);
+        }
+      }
     }
 
     setup();
 
     timeoutId = setTimeout(() => {
-      if (!cancelled) setPeerSetupDone(true);
+      if (!cancelled) {
+        console.log('[Peer] Setup timeout reached, marking as done');
+        setPeerSetupDone(true);
+      }
     }, PEER_SETUP_TIMEOUT_MS);
 
     return () => {
@@ -194,25 +225,40 @@ export default function RoomPage() {
   useEffect(() => {
     if (!hasJoined || !displayName || !peerSetupDone || !roomId) return;
 
+    console.log('[Socket] Connecting to room:', roomId);
     const socket = getSocket();
     socketRef.current = socket;
     socket.connect();
 
     socket.on('connect', () => {
+      console.log('[Socket] Connected');
       setConnectionState('connected');
       socket.emit('room:join', { roomId, displayName, peerId: myPeerIdRef.current });
     });
 
-    socket.on('disconnect', () => setConnectionState('reconnecting'));
+    socket.on('connect_error', (err) => {
+      console.error('[Socket] Connection error:', err);
+    });
+
+    socket.on('disconnect', () => {
+      console.log('[Socket] Disconnected');
+      setConnectionState('reconnecting');
+    });
+    
     socket.on('reconnect', () => {
+      console.log('[Socket] Reconnected');
       setConnectionState('connected');
       socket.emit('room:join', { roomId, displayName, peerId: myPeerIdRef.current });
     });
 
-    socket.on('room:notFound', () => setRoomNotFound(true));
+    socket.on('room:notFound', () => {
+      console.log('[Socket] Room not found:', roomId);
+      setRoomNotFound(true);
+    });
 
     socket.on('room:state', (state) => {
       if (!state) return;
+      console.log('[Socket] Room state updated');
       applyRemotePlaybackState(state.currentTime, state.isPlaying);
       setParticipants(state.participants || []);
       setReactions(state.reactions || []);
@@ -222,10 +268,12 @@ export default function RoomPage() {
     });
 
     socket.on('room:userJoined', ({ displayName: name, peerId }) => {
+      console.log('[Socket] User joined:', name);
       setParticipants((prev) => [...prev, { displayName: name, peerId }]);
     });
 
     socket.on('room:userLeft', ({ displayName: name, peerId }) => {
+      console.log('[Socket] User left:', name);
       setParticipants((prev) => prev.filter((p) => p.displayName !== name));
       if (peerId) {
         activeCallsRef.current.get(peerId)?.close();
@@ -261,6 +309,7 @@ export default function RoomPage() {
     });
 
     return () => {
+      console.log('[Socket] Cleaning up');
       socket.off();
       socket.disconnect();
     };
@@ -296,32 +345,79 @@ export default function RoomPage() {
   useEffect(() => {
     if (!hasJoined || !roomId) return; // FIX: Added !roomId condition
     let cancelled = false;
+    let retryCount = 0;
+    const maxRetries = 3;
 
-    function createYoutubePlayer(videoId) {
-      if (cancelled || !playerElRef.current) return;
-      playerRef.current = new window.YT.Player(playerElRef.current, {
-        videoId,
-        playerVars: { rel: 0, modestbranding: 1 },
-        events: {
-          onReady: (e) => {
-            playerReadyRef.current = true;
-            setVideoDuration(e.target.getDuration());
-          },
-          onStateChange: handlePlayerStateChange,
-        },
-      });
+    async function fetchRoomWithRetry() {
+      setIsLoadingRoom(true);
+      setRoomFetchError('');
+
+      for (let i = 0; i < maxRetries; i++) {
+        if (cancelled) return;
+
+        try {
+          console.log(`[Room] Fetching room ${roomId} (attempt ${i + 1}/${maxRetries})`);
+          const res = await fetch(`/api/rooms/${roomId}`);
+          
+          if (!res.ok) {
+            const errorData = await res.json().catch(() => ({ error: 'Unknown error' }));
+            console.error(`[Room] Fetch failed:`, res.status, errorData);
+            
+            if (res.status === 404) {
+              setRoomNotFound(true);
+              return;
+            }
+            
+            // For 500 errors or cold starts, retry
+            if (i < maxRetries - 1) {
+              const delay = Math.pow(2, i) * 1000; // Exponential backoff: 1s, 2s, 4s
+              console.log(`[Room] Retrying in ${delay}ms...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+              continue;
+            }
+            
+            throw new Error(errorData.error || `HTTP ${res.status}`);
+          }
+
+          const data = await res.json();
+          console.log('[Room] Room data received:', data);
+          
+          if (cancelled) return;
+
+          function createYoutubePlayer(videoId) {
+            if (cancelled || !playerElRef.current) return;
+            playerRef.current = new window.YT.Player(playerElRef.current, {
+              videoId,
+              playerVars: { rel: 0, modestbranding: 1 },
+              events: {
+                onReady: (e) => {
+                  playerReadyRef.current = true;
+                  setVideoDuration(e.target.getDuration());
+                },
+                onStateChange: handlePlayerStateChange,
+              },
+            });
+          }
+
+          if (window.YT && window.YT.Player) {
+            createYoutubePlayer(data.videoId);
+          } else {
+            window.onYouTubeIframeAPIReady = () => createYoutubePlayer(data.videoId);
+          }
+          
+          setIsLoadingRoom(false);
+          return;
+        } catch (error) {
+          console.error('[Room] Fetch error:', error);
+          if (i === maxRetries - 1) {
+            setRoomFetchError(`Failed to load room: ${error.message}`);
+            setIsLoadingRoom(false);
+          }
+        }
+      }
     }
 
-    fetch(`/api/rooms/${roomId}`)
-      .then((res) => {
-        if (!res.ok) throw new Error('not found');
-        return res.json();
-      })
-      .then(({ videoId }) => {
-        if (window.YT && window.YT.Player) createYoutubePlayer(videoId);
-        else window.onYouTubeIframeAPIReady = () => createYoutubePlayer(videoId);
-      })
-      .catch(() => setRoomNotFound(true));
+    fetchRoomWithRetry();
 
     return () => { cancelled = true; };
   }, [hasJoined, roomId]);
@@ -417,6 +513,17 @@ export default function RoomPage() {
         <div className="mb-3 flex items-center gap-2 rounded-lg border border-[#e8a33d]/30 bg-[#e8a33d]/10 px-3 py-2 text-xs text-[#e8a33d]">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#e8a33d]" />
           Reconnecting…
+        </div>
+      )}
+      {isLoadingRoom && (
+        <div className="mb-3 flex items-center gap-2 rounded-lg border border-[#3dbfa8]/30 bg-[#3dbfa8]/10 px-3 py-2 text-xs text-[#3dbfa8]">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#3dbfa8]" />
+          Loading room…
+        </div>
+      )}
+      {roomFetchError && (
+        <div className="mb-3 rounded-lg border border-[#e0685b]/30 bg-[#e0685b]/10 px-3 py-2 text-xs text-[#e0685b]">
+          {roomFetchError}
         </div>
       )}
       {mediaError && (
