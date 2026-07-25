@@ -49,17 +49,64 @@ export default function LandingPage() {
     }
 
     setLoading(true);
+    console.log('[CreateRoom] Starting room creation with URL:', youtubeUrl.trim());
+    
+    // Timeout wrapper to prevent infinite loading
+    const TIMEOUT_MS = 10000; // 10 seconds
+    let timeoutId;
+    
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(`Request timed out after ${TIMEOUT_MS}ms`));
+      }, TIMEOUT_MS);
+    });
+    
     try {
-      const res = await fetch('/api/rooms', {
+      console.log('[CreateRoom] Initiating fetch to /api/rooms');
+      const fetchStart = performance.now();
+      
+      const fetchPromise = fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ youtubeUrl: youtubeUrl.trim() }),
       });
-      if (!res.ok) throw new Error('Could not create the room. Try again.');
-      const { roomId } = await res.json();
-      router.push(`/room/${roomId}`);
+      
+      // Race between fetch and timeout
+      const res = await Promise.race([fetchPromise, timeoutPromise]);
+      
+      clearTimeout(timeoutId);
+      const fetchEnd = performance.now();
+      console.log('[CreateRoom] Fetch completed in', (fetchEnd - fetchStart).toFixed(2), 'ms');
+      console.log('[CreateRoom] Response status:', res.status, res.statusText);
+      console.log('[CreateRoom] Response headers:', Object.fromEntries(res.headers.entries()));
+      
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => 'Unknown error');
+        console.error('[CreateRoom] Response not OK:', res.status, errorText);
+        throw new Error(`Could not create the room. Server returned ${res.status}: ${errorText}`);
+      }
+      
+      console.log('[CreateRoom] Parsing JSON response');
+      const data = await res.json();
+      console.log('[CreateRoom] Parsed response data:', data);
+      
+      // Runtime check for roomId
+      if (!data.roomId) {
+        console.error('[CreateRoom] ERROR: roomId is missing from response!', data);
+        throw new Error('Server response missing roomId. Please try again.');
+      }
+      
+      console.log('[CreateRoom] Extracted roomId:', data.roomId);
+      console.log('[CreateRoom] About to navigate to /room/', data.roomId);
+      
+      router.push(`/room/${data.roomId}`);
+      console.log('[CreateRoom] Navigation initiated');
+      
     } catch (err) {
-      setError(err.message);
+      clearTimeout(timeoutId);
+      console.error('[CreateRoom] ERROR in fetch chain:', err);
+      console.error('[CreateRoom] Error stack:', err.stack);
+      setError(err.message || 'Failed to create room. Please try again.');
       setLoading(false);
     }
   }
