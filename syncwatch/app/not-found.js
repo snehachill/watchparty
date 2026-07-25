@@ -1,5 +1,13 @@
 import Link from 'next/link';
 
+// No next/font import here on purpose — this page is statically prerendered
+// at build time, and font loading is already handled once, globally, by
+// app/layout.js. Duplicating a next/font call inside a 'use client'
+// component on this specific route was causing a build-time prerender
+// crash ("Cannot read properties of null (reading 'useContext')").
+// Fonts still apply here via the CSS variables set on <html>/<body> in the
+// root layout, using Tailwind's font-* utility classes below instead of a
+// second font instance.
 export default function GlobalNotFound() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-[#0b0b0d] px-6 text-center text-[#f2f0ea]">
@@ -8,7 +16,7 @@ export default function GlobalNotFound() {
         <path d="M9 9c0-1.5 3-1.5 3 0s-1.5 1.5-1.5 3" strokeLinecap="round" />
         <circle cx="10.5" cy="16" r="0.5" fill="#8a8880" />
       </svg>
-      <h1 className="mb-1 text-lg font-medium">Page not found</h1>
+      <h1 className="mb-1 font-serif text-lg">Page not found</h1>
       <p className="mb-6 max-w-xs text-sm text-[#8a8880]">
         The page you're looking for doesn't exist.
       </p>
