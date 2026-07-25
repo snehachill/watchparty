@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, use } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Fraunces, Inter, JetBrains_Mono } from 'next/font/google';
 import { getSocket } from '@/lib/socket';
@@ -13,10 +13,13 @@ const mono = JetBrains_Mono({ subsets: ['latin'], weight: ['400', '500'], variab
 const REACTIONS = ['😂', '❤️', '😮', '👏'];
 const DRIFT_TOLERANCE_SECONDS = 1.5;
 const SYNC_BROADCAST_INTERVAL_MS = 5000;
-const PEER_SETUP_TIMEOUT_MS = 4000; // don't block joining forever if camera/peer setup hangs
+const PEER_SETUP_TIMEOUT_MS = 4000;
 
 export default function RoomPage() {
-  const { roomId } = useParams();
+  const params = useParams();
+  // Safe extraction for Next.js 15+
+  const roomId = params?.roomId;
+
   const router = useRouter();
 
   const socketRef = useRef(null);
@@ -29,7 +32,7 @@ export default function RoomPage() {
   const peerRef = useRef(null);
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
-  const activeCallsRef = useRef(new Map()); // peerId -> MediaConnection
+  const activeCallsRef = useRef(new Map());
   const myPeerIdRef = useRef(null);
 
   const [displayName, setDisplayName] = useState('');
@@ -51,13 +54,8 @@ export default function RoomPage() {
   const [hasLocalStream, setHasLocalStream] = useState(false);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
-  const [remoteStreams, setRemoteStreams] = useState({}); // peerId -> MediaStream
+  const [remoteStreams, setRemoteStreams] = useState({});
 
-  // Runs whenever hasLocalStream flips true, which is exactly when the
-  // <video> element for the local preview actually mounts (it's
-  // conditionally rendered). Setting srcObject any earlier — e.g. directly
-  // inside the getUserMedia setup function — targets a ref that's still
-  // null, since React hasn't rendered the element yet at that point.
   useEffect(() => {
     if (hasLocalStream && localVideoRef.current && localStreamRef.current) {
       localVideoRef.current.srcObject = localStreamRef.current;
@@ -114,40 +112,32 @@ export default function RoomPage() {
 
       peer.on('open', (id) => {
         if (cancelled) return;
-        console.log('[peer] my peer id:', id);
         myPeerIdRef.current = id;
         setPeerSetupDone(true);
       });
 
       peer.on('error', (err) => {
-        console.error('[peer] error:', err.type, err.message);
-        if (!cancelled) setPeerSetupDone(true); // don't block chat/sync on a peer failure
+        if (!cancelled) setPeerSetupDone(true);
       });
 
       peer.on('call', (call) => {
-        console.log('[peer] incoming call from:', call.peer);
         call.answer(localStreamRef.current || undefined);
         call.on('stream', (remoteStream) => {
-          console.log('[peer] received remote stream from:', call.peer, remoteStream.getTracks());
           setRemoteStreams((prev) => ({ ...prev, [call.peer]: remoteStream }));
         });
         call.on('close', () => {
-          console.log('[peer] call closed:', call.peer);
           setRemoteStreams((prev) => {
             const next = { ...prev };
             delete next[call.peer];
             return next;
           });
         });
-        call.on('error', (err) => console.error('[peer] call error:', call.peer, err));
         activeCallsRef.current.set(call.peer, call);
       });
     }
 
     setup();
 
-    // Fallback: if camera prompt is ignored or peer never opens, don't
-    // block the socket join forever
     timeoutId = setTimeout(() => {
       if (!cancelled) setPeerSetupDone(true);
     }, PEER_SETUP_TIMEOUT_MS);
@@ -165,30 +155,15 @@ export default function RoomPage() {
   }, [hasJoined]);
 
   const callPeer = useCallback((peerId) => {
-    if (!peerRef.current || !peerId) {
-      console.log('[peer] skipping call — no peer instance or empty peerId:', peerId);
-      return;
-    }
+    if (!peerRef.current || !peerId) return;
     if (peerId === myPeerIdRef.current) return;
-    if (activeCallsRef.current.has(peerId)) {
-      console.log('[peer] already have a call with:', peerId);
-      return;
-    }
+    if (activeCallsRef.current.has(peerId)) return;
 
-    console.log('[peer] calling:', peerId, 'with local stream?', Boolean(localStreamRef.current));
-    // peer.call() requires an actual MediaStream object (unlike
-    // call.answer(), which tolerates undefined for receive-only answers) —
-    // fall back to an empty, trackless stream when we have no camera, so
-    // callers without a working camera can still initiate calls and
-    // receive the other side's video.
     const outgoingStream = localStreamRef.current || new MediaStream();
     const call = peerRef.current.call(peerId, outgoingStream);
-    if (!call) {
-      console.error('[peer] call() returned nothing for:', peerId);
-      return;
-    }
+    if (!call) return;
+
     call.on('stream', (remoteStream) => {
-      console.log('[peer] received remote stream from:', peerId, remoteStream.getTracks());
       setRemoteStreams((prev) => ({ ...prev, [peerId]: remoteStream }));
     });
     call.on('close', () => {
@@ -198,7 +173,6 @@ export default function RoomPage() {
         return next;
       });
     });
-    call.on('error', (err) => console.error('[peer] outgoing call error:', peerId, err));
     activeCallsRef.current.set(peerId, call);
   }, []);
 
@@ -218,7 +192,7 @@ export default function RoomPage() {
 
   // --- Socket connection + room events -----------------------------------
   useEffect(() => {
-    if (!hasJoined || !displayName || !peerSetupDone) return;
+    if (!hasJoined || !displayName || !peerSetupDone || !roomId) return;
 
     const socket = getSocket();
     socketRef.current = socket;
@@ -239,16 +213,11 @@ export default function RoomPage() {
 
     socket.on('room:state', (state) => {
       if (!state) return;
-      console.log('[room] state received, participants:', state.participants);
       applyRemotePlaybackState(state.currentTime, state.isPlaying);
       setParticipants(state.participants || []);
       setReactions(state.reactions || []);
-      // Newcomer calls everyone already present — existing clients just
-      // wait for incoming calls, avoiding duplicate connections from both
-      // sides calling each other at once.
       (state.participants || []).forEach((p) => {
         if (p.peerId) callPeer(p.peerId);
-        else console.log('[room] participant has no peerId, skipping call:', p.displayName);
       });
     });
 
@@ -295,7 +264,6 @@ export default function RoomPage() {
       socket.off();
       socket.disconnect();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasJoined, displayName, roomId, peerSetupDone, callPeer]);
 
   function applyRemotePlaybackState(currentTime, isPlaying) {
@@ -324,8 +292,9 @@ export default function RoomPage() {
     }
   }
 
+  // --- API Room Fetch Fix ---------------------------------------
   useEffect(() => {
-    if (!hasJoined) return;
+    if (!hasJoined || !roomId) return; // FIX: Added !roomId condition
     let cancelled = false;
 
     function createYoutubePlayer(videoId) {
@@ -355,7 +324,6 @@ export default function RoomPage() {
       .catch(() => setRoomNotFound(true));
 
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasJoined, roomId]);
 
   const handlePlayerStateChange = useCallback((event) => {
@@ -377,7 +345,7 @@ export default function RoomPage() {
   }, [roomId]);
 
   useEffect(() => {
-    if (!hasJoined) return;
+    if (!hasJoined || !roomId) return;
     const interval = setInterval(() => {
       if (!playerRef.current || !playerReadyRef.current || !socketRef.current) return;
       socketRef.current.emit('video:sync', {
@@ -549,7 +517,6 @@ export default function RoomPage() {
             </div>
           </div>
 
-          {/* Webcam strip */}
           <div className="mt-3 flex gap-2 overflow-x-auto">
             <div className="relative h-20 min-w-[112px] overflow-hidden rounded-lg border border-white/10 bg-white/[0.03]">
               {hasLocalStream ? (
