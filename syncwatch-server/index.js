@@ -14,8 +14,11 @@ const {
 } = require('./roomState');
 
 const PORT = process.env.PORT || 4000;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
-const DEBUG = process.env.DEBUG_SOCKET !== 'false'; // set DEBUG_SOCKET=false to silence logs
+
+// Allow requests from localhost OR your production Vercel frontend URL
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+
+const DEBUG = process.env.DEBUG_SOCKET !== 'false';
 
 function log(...args) {
   if (DEBUG) console.log('[socket]', ...args);
@@ -23,7 +26,11 @@ function log(...args) {
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
-  cors: { origin: CORS_ORIGIN, methods: ['GET', 'POST'] },
+  cors: { 
+    origin: CORS_ORIGIN, 
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
 });
 
 io.on('connection', (socket) => {
@@ -56,7 +63,6 @@ io.on('connection', (socket) => {
 
     const state = addParticipant(roomId, { displayName, socketId: socket.id, peerId }, room);
 
-    // First person into an empty room becomes the sync-authority host
     if (!isHost(roomId)) {
       setHost(roomId, socket.id);
       log(`${displayName} (${socket.id}) is now host of room ${roomId}`);
@@ -86,14 +92,10 @@ io.on('connection', (socket) => {
     log('RECEIVED video:seek', { roomId, currentTime, from: socket.id });
     const result = applyEvent(roomId, { type: 'seek', currentTime, socketId: socket.id });
     log('video:seek resolved to:', result);
-    // The sender's own client already applied its own seek locally — only
-    // broadcast to everyone else in the room
     if (result) socket.to(roomId).emit('video:seek', { currentTime: result.currentTime });
   });
 
   socket.on('video:sync', ({ roomId, currentTime }) => {
-    // Only trust drift-correction pings from the current host — otherwise
-    // any client's clock jitter could yank everyone else's playback around
     if (!isHost(roomId, socket.id)) return;
     socket.to(roomId).emit('video:sync', { currentTime });
   });
@@ -124,7 +126,8 @@ io.on('connection', (socket) => {
 connectToDatabase()
   .then(() => {
     log('connected to MongoDB');
-    httpServer.listen(PORT, () => {
+    // Important: Added '0.0.0.0' for Render Port Scanning
+    httpServer.listen(PORT, '0.0.0.0', () => {
       console.log(`Socket.io server listening on port ${PORT}`);
     });
   })
